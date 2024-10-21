@@ -11,10 +11,14 @@
 (define-constant ERR-ALREADY-PAID (err u104))
 (define-constant ERR-NOT-PAID (err u105))
 (define-constant ERR-INVALID-STATE (err u106))
+(define-constant ERR-INVALID-SELLER (err u107))
+(define-constant ERR-INVALID-BUYER (err u108))
+(define-constant ERR-INVALID-PRINCIPAL (err u109))
+(define-constant CONTRACT-OWNER tx-sender)
 
 ;; Data Variables
-(define-data-var contract-owner principal tx-sender)
-(define-data-var seller principal tx-sender)
+(define-data-var contract-owner principal CONTRACT-OWNER)
+(define-data-var seller principal CONTRACT-OWNER)
 (define-data-var buyer (optional principal) none)
 (define-data-var property-price uint u0)
 (define-data-var deposit-amount uint u0)
@@ -23,6 +27,7 @@
 (define-data-var is-completed bool false)
 
 ;; Data Maps
+(define-map allowed-principals principal bool)
 (define-map transaction-details
   { tx-id: uint }
   {
@@ -48,17 +53,43 @@
   )
 )
 
+(define-private (check-principal (principal-to-check principal))
+  (begin
+    (asserts! (not (is-eq principal-to-check CONTRACT-OWNER)) ERR-INVALID-PRINCIPAL)
+    (asserts! (not (is-eq principal-to-check tx-sender)) ERR-INVALID-PRINCIPAL)
+    (ok true)
+  )
+)
+
+(define-private (validate-and-store-principal (principal-to-store principal))
+  (begin
+    (try! (check-principal principal-to-store))
+    (map-set allowed-principals principal-to-store true)
+    (ok true)
+  )
+)
+
 ;; Public Functions
 (define-public (initialize-escrow (new-seller principal) (new-buyer principal) (price uint))
   (begin
     (asserts! (not (var-get is-initialized)) ERR-ALREADY-INITIALIZED)
     (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
     (asserts! (> price u0) ERR-WRONG-PRICE)
+    (asserts! (not (is-eq new-seller new-buyer)) ERR-INVALID-PRINCIPAL)
     
+    ;; Validate and store principals
+    (try! (validate-and-store-principal new-seller))
+    (try! (validate-and-store-principal new-buyer))
+    
+    ;; Verify principals are allowed
+    (asserts! (is-some (map-get? allowed-principals new-seller)) ERR-INVALID-SELLER)
+    (asserts! (is-some (map-get? allowed-principals new-buyer)) ERR-INVALID-BUYER)
+    
+    ;; Only set variables after all checks pass
     (var-set seller new-seller)
     (var-set buyer (some new-buyer))
     (var-set property-price price)
-    (var-set deposit-amount (/ (* price u10) u100)) ;; 10% deposit
+    (var-set deposit-amount (/ (* price u10) u100))
     (var-set is-initialized true)
     (ok true)
   )
@@ -107,27 +138,23 @@
 )
 
 (define-public (refund-deposit)
-  (begin
-    (asserts! (var-get is-initialized) ERR-NOT-INITIALIZED)
-    (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
-    (asserts! (var-get is-paid) ERR-NOT-PAID)
-    (asserts! (not (var-get is-completed)) ERR-INVALID-STATE)
-    
-    (match (var-get buyer)
-      buyer-principal
-      (begin
-        (try! (as-contract (stx-transfer? (var-get deposit-amount) tx-sender buyer-principal)))
-        (var-set is-paid false)
-        (map-set transaction-details {tx-id: u3}
-          {
-            amount: (var-get deposit-amount),
-            timestamp: block-height,
-            status: "REFUNDED"
-          }
-        )
-        (ok true)
+  (let ((buyer-principal (unwrap! (var-get buyer) ERR-NOT-INITIALIZED)))
+    (begin
+      (asserts! (var-get is-initialized) ERR-NOT-INITIALIZED)
+      (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+      (asserts! (var-get is-paid) ERR-NOT-PAID)
+      (asserts! (not (var-get is-completed)) ERR-INVALID-STATE)
+      
+      (try! (as-contract (stx-transfer? (var-get deposit-amount) tx-sender buyer-principal)))
+      (var-set is-paid false)
+      (map-set transaction-details {tx-id: u3}
+        {
+          amount: (var-get deposit-amount),
+          timestamp: block-height,
+          status: "REFUNDED"
+        }
       )
-      (err ERR-NOT-INITIALIZED)
+      (ok true)
     )
   )
 )
@@ -147,4 +174,8 @@
 
 (define-read-only (get-transaction-detail (tx-id uint))
   (map-get? transaction-details {tx-id: tx-id})
+)
+
+(define-read-only (is-allowed-principal (principal-to-check principal))
+  (default-to false (map-get? allowed-principals principal-to-check))
 )
