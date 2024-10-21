@@ -1,5 +1,5 @@
 ;; SecureEstate: A Secure Escrow Smart Contract for Real Estate Transactions
-;; Version: 2.0
+;; Version: 2.1
 ;; Author: Your Organization
 ;; License: MIT
 
@@ -10,6 +10,7 @@
 (define-constant MAX-YEAR u2100)
 (define-constant BLOCKS-PER-DAY u144)
 (define-constant DEPOSIT-PERCENTAGE u10)
+(define-constant MAX-UINT u340282366920938463463374607431768211455)
 
 ;; Error Constants
 (define-constant ERR-NOT-AUTHORIZED (err u100))
@@ -30,6 +31,7 @@
 (define-constant ERR-INVALID-SIZE (err u115))
 (define-constant ERR-INVALID-YEAR (err u116))
 (define-constant ERR-INVALID-ADDRESS (err u117))
+(define-constant ERR-OVERFLOW (err u118))
 
 ;; Data Variables
 (define-data-var contract-owner principal CONTRACT-OWNER)
@@ -98,12 +100,12 @@
     ERR-INVALID-DAYS))
 
 (define-private (validate-property-id (id uint))
-  (if (> id u0)
+  (if (and (> id u0) (< id MAX-UINT))
     (ok id)
     ERR-INVALID-PROPERTY-ID))
 
 (define-private (validate-property-size (size uint))
-  (if (> size u0)
+  (if (and (> size u0) (< size MAX-UINT))
     (ok size)
     ERR-INVALID-SIZE))
 
@@ -121,7 +123,14 @@
   (ok status))
 
 (define-private (calculate-blocks-from-days (days uint))
-  (ok (* days BLOCKS-PER-DAY)))
+  (let ((validated-days (try! (validate-days-active days))))
+    (asserts! (< (* validated-days BLOCKS-PER-DAY) MAX-UINT) ERR-OVERFLOW)
+    (ok (* validated-days BLOCKS-PER-DAY))))
+
+(define-private (safe-add (a uint) (b uint))
+  (let ((sum (+ a b)))
+    (asserts! (>= sum a) ERR-OVERFLOW)
+    (ok sum)))
 
 ;; Public Functions
 (define-public (initialize-escrow (new-seller principal) (new-buyer principal) (price uint) (days uint))
@@ -131,20 +140,18 @@
     (asserts! (> price u0) ERR-WRONG-PRICE)
     (asserts! (not (is-eq new-seller new-buyer)) ERR-INVALID-PRINCIPAL)
     
-    (let ((valid-days (unwrap! (validate-days-active days) ERR-INVALID-DAYS))
-          (blocks-to-add (unwrap! (calculate-blocks-from-days valid-days) ERR-INVALID-DAYS)))
+    (let ((validated-days (unwrap! (validate-days-active days) ERR-INVALID-DAYS))
+          (blocks (try! (calculate-blocks-from-days validated-days))))
       
       (try! (validate-and-store-principal new-seller))
       (try! (validate-and-store-principal new-buyer))
-      
-      (asserts! (is-some (map-get? allowed-principals new-seller)) ERR-INVALID-SELLER)
-      (asserts! (is-some (map-get? allowed-principals new-buyer)) ERR-INVALID-BUYER)
       
       (var-set seller new-seller)
       (var-set buyer (some new-buyer))
       (var-set property-price price)
       (var-set deposit-amount (/ (* price DEPOSIT-PERCENTAGE) u100))
-      (var-set deadline (+ block-height blocks-to-add))
+      (try! (safe-add block-height blocks))
+      (var-set deadline (+ block-height blocks))
       (var-set is-initialized true)
       (ok true))))
 
@@ -153,17 +160,17 @@
     (asserts! (is-seller) ERR-NOT-AUTHORIZED)
     (asserts! (var-get is-initialized) ERR-NOT-INITIALIZED)
     
-    (let ((valid-id (unwrap! (validate-property-id id) ERR-INVALID-PROPERTY-ID))
-          (valid-addr (unwrap! (validate-address addr) ERR-INVALID-ADDRESS))
-          (valid-size (unwrap! (validate-property-size size) ERR-INVALID-SIZE))
-          (valid-year (unwrap! (validate-year year) ERR-INVALID-YEAR)))
+    (let ((validated-id (unwrap! (validate-property-id id) ERR-INVALID-PROPERTY-ID))
+          (validated-addr (unwrap! (validate-address addr) ERR-INVALID-ADDRESS))
+          (validated-size (unwrap! (validate-property-size size) ERR-INVALID-SIZE))
+          (validated-year (unwrap! (validate-year year) ERR-INVALID-YEAR)))
       
       (map-set property-details
-        { property-id: valid-id }
+        { property-id: validated-id }
         {
-          address: valid-addr,
-          size: valid-size,
-          year-built: valid-year,
+          address: validated-addr,
+          size: validated-size,
+          year-built: validated-year,
           inspection-date: u0
         })
       (ok true))))
@@ -173,9 +180,9 @@
     (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
     (asserts! (var-get is-initialized) ERR-NOT-INITIALIZED)
     
-    (let ((valid-id (unwrap! (validate-property-id id) ERR-INVALID-PROPERTY-ID))
-          (valid-status (unwrap! (validate-inspection-status status) ERR-INVALID-STATE)))
-      (var-set inspection-passed valid-status)
+    (let ((validated-id (unwrap! (validate-property-id id) ERR-INVALID-PROPERTY-ID))
+          (validated-status (unwrap! (validate-inspection-status status) ERR-INVALID-STATE)))
+      (var-set inspection-passed validated-status)
       (ok true))))
 
 (define-public (pay-deposit)
